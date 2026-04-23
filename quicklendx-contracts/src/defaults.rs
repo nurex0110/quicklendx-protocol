@@ -1,3 +1,23 @@
+//! Invoice default handling with one-way finality.
+//!
+//! # Finality invariants
+//! - `mark_invoice_defaulted` and the lower-level `handle_default` only accept
+//!   invoices whose current status is `Funded`. Any other status (`Pending`,
+//!   `Verified`, `Paid`, `Refunded`, `Cancelled`, or already `Defaulted`) is
+//!   rejected before any state mutation.
+//! - A per-invoice transition guard (`DEFAULT_TRANSITION_GUARD_KEY`) is
+//!   check-and-set atomically at the start of `handle_default`, so even a
+//!   direct re-entry that somehow bypasses the status check is rejected with
+//!   `DuplicateDefaultTransition`. This prevents duplicate analytics,
+//!   insurance claim reprocessing, and duplicate event emission.
+//! - The status check runs before the grace-period check, and the
+//!   already-defaulted check runs before the funded-status check, so callers
+//!   always receive the most specific error (see docs/contracts/defaults.md).
+//! - Default does not touch escrow state. A defaulted invoice cannot be
+//!   refunded, settled, or partially paid afterwards — those paths are
+//!   blocked by their own status guards (see `escrow::refund_escrow_funds`
+//!   and `settlement::ensure_payable_status`).
+
 use crate::errors::QuickLendXError;
 use crate::events::{emit_insurance_claimed, emit_invoice_defaulted, emit_invoice_expired};
 use crate::init::ProtocolInitializer;

@@ -188,6 +188,71 @@ Invoices cannot be defaulted before `due_date + grace_period` has elapsed. This 
 
 The validation functions can be safely called multiple times without side effects. Only `handle_default` performs state mutations.
 
+## Finality and Cross-State Ordering Rules
+
+QuickLendX enforces **one-way finality** on invoice lifecycle transitions. Once an invoice leaves `Funded` for any terminal state (`Paid`, `Refunded`, `Defaulted`, or `Cancelled`), no further state transitions are possible and no duplicate funds movement can occur. The status guards in `defaults::mark_invoice_defaulted`, `settlement::ensure_payable_status`, and `escrow::refund_escrow_funds` run **before** any token transfer or storage mutation, so rejected calls neither move funds nor change state.
+
+### Transition matrix
+
+The table below shows which entry point is accepted (`✅ allowed`) or the exact error returned, by current invoice status.
+
+| Current status | `mark_invoice_defaulted` | `settle_invoice` / `process_partial_payment` | `refund_escrow_funds` |
+|---|---|---|---|
+| `Pending` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
+| `Verified` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
+| `Funded` (before grace) | `OperationNotAllowed` | ✅ allowed | ✅ allowed |
+| `Funded` (after grace) | ✅ allowed | ✅ allowed | ✅ allowed |
+| `Paid` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
+| `Refunded` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
+| `Defaulted` | `DuplicateDefaultTransition` (guard) or `InvoiceAlreadyDefaulted` | `InvalidStatus` | `InvalidStatus` |
+| `Cancelled` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
+
+Row ordering notes:
+
+- On `Defaulted`, `mark_invoice_defaulted` returns `InvoiceAlreadyDefaulted` — the status check runs before `handle_default`'s atomic transition guard. Direct calls into `handle_default` that bypass the higher-level status check hit the persistent guard instead and receive `DuplicateDefaultTransition`.
+- `Funded (before grace)` distinguishes the `OperationNotAllowed` path from the status-rejection paths: defaulting on a Funded invoice is only rejected because the grace period has not elapsed. Once time advances past `due_date + grace_period`, the same invoice becomes defaultable.
+
+### Guarantees
+
+These are the three double-accounting scenarios the test suite explicitly defends against:
+
+- **No double default.** `handle_default` begins with `check_and_set_default_guard`, which atomically reads and writes a per-invoice `DEFAULT_TRANSITION_GUARD_KEY` in persistent storage. Any second entry — including a direct call that somehow bypasses the status check — returns `DuplicateDefaultTransition` before any analytics update, investment mutation, event emission, or insurance claim runs. The higher-level `mark_invoice_defaulted` catches the common case one layer earlier and returns `InvoiceAlreadyDefaulted`.
+- **No double refund.** `escrow::refund_escrow_funds` requires `invoice.status == Funded`. After the first successful refund, the status becomes `Refunded` and every subsequent call returns `InvalidStatus` without moving funds or emitting an `escrow_refunded` event. The lower-level `payments::refund_escrow` independently requires `escrow.status == Held`, giving defense in depth: even if the invoice-level check could be bypassed, the escrow-level check still rejects the second refund.
+- **No double settlement.** The settlement module maintains a persistent `Finalized` flag set inside `settle_invoice_internal` **before** any token transfer. Any subsequent `settle_invoice` or `process_partial_payment` call short-circuits on either the `is_finalized` check or the `ensure_payable_status` check (which rejects `Paid` invoices) and returns `InvalidStatus`. Even if a transient failure prevented the status from being written, the `Finalized` flag would still survive and block re-entry.
+
+### Cross-state finality
+
+Once an invoice is `Defaulted`, `Refunded`, or `Paid`, it cannot be moved to any other terminal state. The following new tests enforce this invariant module-by-module:
+
+- `src/test_default.rs`
+  - `test_cannot_default_refunded_invoice`
+  - `test_cannot_default_after_settlement`
+  - `test_default_leaves_escrow_held`
+  - `test_second_default_attempt_does_not_change_state`
+  - `test_cannot_partial_pay_defaulted_invoice`
+  - `test_cannot_settle_defaulted_invoice`
+- `src/test_refund.rs`
+  - `test_cannot_refund_defaulted_invoice`
+  - `test_cannot_refund_paid_invoice`
+  - `test_double_refund_does_not_double_transfer_funds`
+  - `test_cannot_settle_refunded_invoice`
+  - `test_cannot_default_refunded_invoice_crossmodule`
+- `src/test_settlement.rs`
+  - `test_cannot_settle_defaulted_invoice_through_settle_invoice`
+  - `test_cannot_partial_pay_defaulted_invoice`
+  - `test_cannot_partial_pay_after_settlement`
+  - `test_no_double_transfer_on_double_settle_attempt`
+  - `test_finalization_flag_stable_after_failed_retries`
+  - `test_cannot_settle_refunded_invoice_through_settle_invoice`
+
+### Security rationale
+
+- Prevents duplicate investor payouts by making each terminal transition one-shot and ensuring the `Finalized` flag and status check both run before any token transfer.
+- Prevents duplicate insurance claim processing by making the default transition atomic via `DEFAULT_TRANSITION_GUARD_KEY` — insurance claims are only submitted from `handle_default`, which cannot run twice for the same invoice.
+- Prevents analytics drift (investor success/fail counters, funded/defaulted totals) by guaranteeing each invoice is counted exactly once per terminal outcome.
+- Prevents event replay: `invoice_defaulted`, `invoice_settled`, and `escrow_refunded` events emit at most once per invoice, so off-chain indexers never see duplicates.
+- Keeps on-chain accounting reconcilable with off-chain books: because no funds move on rejected retries, the sum of settled payouts, refunded escrows, and defaulted principal over time exactly equals the funded principal, with no phantom entries.
+
 ## Test Coverage
 
 Tests are in `src/test_default.rs` and `src/test_errors.rs`:
