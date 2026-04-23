@@ -1119,7 +1119,15 @@ fn test_no_double_transfer_on_double_settle_attempt() {
         investor_balance_mid - investor_balance_before,
         investor_return
     );
-    assert_eq!(contract_balance_mid - contract_balance_before, platform_fee);
+    // Contract net delta = platform_fee credit (route_platform_fee sends to the
+    // contract when no treasury is configured) minus investment_amount
+    // (release_escrow drained the held escrow back to the business before the
+    // fee was routed). `contract_balance_before` was snapshotted after
+    // setup_funded_invoice, so it already includes the held escrow.
+    assert_eq!(
+        contract_balance_mid - contract_balance_before,
+        platform_fee - investment_amount,
+    );
 
     // Second settle attempt must be rejected.
     let result = client.try_settle_invoice(&invoice_id, &invoice_amount);

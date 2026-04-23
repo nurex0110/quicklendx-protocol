@@ -247,7 +247,7 @@ Once an invoice is `Defaulted`, `Refunded`, or `Paid`, it cannot be moved to any
 
 ### Security rationale
 
-- Prevents duplicate investor payouts by making each terminal transition one-shot and ensuring the `Finalized` flag and status check both run before any token transfer.
+- Prevents duplicate investor payouts by making each terminal transition one-shot: the `Finalized` flag is *checked* on entry to `settle_invoice` and `settle_invoice_internal` (before any escrow release or token transfer) and *written* by `mark_finalized` after the payout transfers complete. Together with the `Paid` status check, this rejects every subsequent attempt before funds can move again.
 - Prevents duplicate insurance claim processing by making the default transition atomic via `DEFAULT_TRANSITION_GUARD_KEY` — insurance claims are only submitted from `handle_default`, which cannot run twice for the same invoice.
 - Prevents analytics drift (investor success/fail counters, funded/defaulted totals) by guaranteeing each invoice is counted exactly once per terminal outcome.
 - Prevents event replay: `invoice_defaulted`, `invoice_settled`, and `escrow_refunded` events emit at most once per invoice, so off-chain indexers never see duplicates.
