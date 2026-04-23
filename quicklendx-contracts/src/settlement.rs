@@ -3,11 +3,14 @@
 //!
 //! # Invariants
 //! - `total_paid <= total_due` is enforced at every payment recording step.
-//! - Settlement finalization is idempotent: once `status == Paid`, further
-//!   settlement attempts are rejected with `InvalidStatus`. The
-//!   persistent `Finalized` flag set by `mark_finalized` survives across
-//!   calls and blocks re-entry via either `settle_invoice` or
-//!   `process_partial_payment` before any funds move.
+//! - Settlement finalization is idempotent: `settle_invoice` and
+//!   `settle_invoice_internal` both read the persistent `Finalized` flag on
+//!   entry, so any retry against a settled invoice short-circuits with
+//!   `InvalidStatus` before escrow release or any token transfer. The flag
+//!   is written by `mark_finalized` after the payout transfers but before
+//!   the `Paid` status transition, so once committed it, together with the
+//!   terminal status, rejects every subsequent `settle_invoice` or
+//!   `process_partial_payment` call.
 //! - `investor_return + platform_fee == total_paid` is asserted before fund
 //!   disbursement to prevent accounting drift.
 //! - Payment count cannot exceed `MAX_PAYMENT_COUNT` per invoice.

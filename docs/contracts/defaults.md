@@ -204,12 +204,12 @@ The table below shows which entry point is accepted (`✅ allowed`) or the exact
 | `Funded` (after grace) | ✅ allowed | ✅ allowed | ✅ allowed |
 | `Paid` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
 | `Refunded` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
-| `Defaulted` | `DuplicateDefaultTransition` (guard) or `InvoiceAlreadyDefaulted` | `InvalidStatus` | `InvalidStatus` |
+| `Defaulted` | `InvoiceAlreadyDefaulted` | `InvalidStatus` | `InvalidStatus` |
 | `Cancelled` | `InvoiceNotAvailableForFunding` | `InvalidStatus` | `InvalidStatus` |
 
 Row ordering notes:
 
-- On `Defaulted`, `mark_invoice_defaulted` returns `InvoiceAlreadyDefaulted` — the status check runs before `handle_default`'s atomic transition guard. Direct calls into `handle_default` that bypass the higher-level status check hit the persistent guard instead and receive `DuplicateDefaultTransition`.
+- On `Defaulted`, `mark_invoice_defaulted` returns `InvoiceAlreadyDefaulted` — the status check at the public entry point runs before `handle_default` is called. A direct call into `handle_default` on an already-defaulted invoice hits the persistent transition guard first and receives `DuplicateDefaultTransition` instead. The public API never returns `DuplicateDefaultTransition` under normal flow.
 - `Funded (before grace)` distinguishes the `OperationNotAllowed` path from the status-rejection paths: defaulting on a Funded invoice is only rejected because the grace period has not elapsed. Once time advances past `due_date + grace_period`, the same invoice becomes defaultable.
 
 ### Guarantees
@@ -218,7 +218,7 @@ These are the three double-accounting scenarios the test suite explicitly defend
 
 - **No double default.** `handle_default` begins with `check_and_set_default_guard`, which atomically reads and writes a per-invoice `DEFAULT_TRANSITION_GUARD_KEY` in persistent storage. Any second entry — including a direct call that somehow bypasses the status check — returns `DuplicateDefaultTransition` before any analytics update, investment mutation, event emission, or insurance claim runs. The higher-level `mark_invoice_defaulted` catches the common case one layer earlier and returns `InvoiceAlreadyDefaulted`.
 - **No double refund.** `escrow::refund_escrow_funds` requires `invoice.status == Funded`. After the first successful refund, the status becomes `Refunded` and every subsequent call returns `InvalidStatus` without moving funds or emitting an `escrow_refunded` event. The lower-level `payments::refund_escrow` independently requires `escrow.status == Held`, giving defense in depth: even if the invoice-level check could be bypassed, the escrow-level check still rejects the second refund.
-- **No double settlement.** The settlement module maintains a persistent `Finalized` flag set inside `settle_invoice_internal` **before** any token transfer. Any subsequent `settle_invoice` or `process_partial_payment` call short-circuits on either the `is_finalized` check or the `ensure_payable_status` check (which rejects `Paid` invoices) and returns `InvalidStatus`. Even if a transient failure prevented the status from being written, the `Finalized` flag would still survive and block re-entry.
+- **No double settlement.** `settle_invoice` reads the persistent `Finalized` flag on entry (`settle_invoice_internal` also re-reads it), so any retry of an already-settled invoice short-circuits with `InvalidStatus` before escrow release or any token transfer. The flag itself is written by `mark_finalized` after the payout transfers succeed but before the `Paid` status transition, so once the first settlement commits, both the flag and the terminal `Paid` status block every subsequent `settle_invoice` or `process_partial_payment` attempt (the latter also fails `ensure_payable_status`).
 
 ### Cross-state finality
 

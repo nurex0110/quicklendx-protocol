@@ -1215,9 +1215,9 @@ fn test_default_leaves_escrow_held() {
 }
 
 /// A second default attempt against an already-defaulted invoice must not
-/// modify any state. The transition guard rejects it with
-/// `DuplicateDefaultTransition` before any analytics or investment update
-/// can run a second time.
+/// modify any state. The public entry point short-circuits on the
+/// already-defaulted status check and returns `InvoiceAlreadyDefaulted`
+/// before any analytics or investment update can run a second time.
 #[test]
 fn test_second_default_attempt_does_not_change_state() {
     let (env, client, admin) = setup();
@@ -1239,12 +1239,13 @@ fn test_second_default_attempt_does_not_change_state() {
     let investment_snapshot = client.get_invoice_investment(&invoice_id);
     assert_eq!(invoice_snapshot.status, InvoiceStatus::Defaulted);
 
-    // Second default attempt must be rejected by the transition guard.
+    // Second default attempt must be rejected by the already-defaulted
+    // status check at the public entry point.
     let result = client.try_mark_invoice_defaulted(&invoice_id, &Some(grace_period));
     assert!(result.is_err());
     let err = result.err().unwrap();
     let contract_err = err.expect("expected contract error");
-    assert_eq!(contract_err, QuickLendXError::DuplicateDefaultTransition);
+    assert_eq!(contract_err, QuickLendXError::InvoiceAlreadyDefaulted);
 
     // Invoice fields that the default path mutates must be unchanged.
     let invoice_after = client.get_invoice(&invoice_id);

@@ -1,14 +1,18 @@
 //! Invoice default handling with one-way finality.
 //!
 //! # Finality invariants
-//! - `mark_invoice_defaulted` and the lower-level `handle_default` only accept
-//!   invoices whose current status is `Funded`. Any other status (`Pending`,
-//!   `Verified`, `Paid`, `Refunded`, `Cancelled`, or already `Defaulted`) is
-//!   rejected before any state mutation.
-//! - A per-invoice transition guard (`DEFAULT_TRANSITION_GUARD_KEY`) is
-//!   check-and-set atomically at the start of `handle_default`, so even a
-//!   direct re-entry that somehow bypasses the status check is rejected with
-//!   `DuplicateDefaultTransition`. This prevents duplicate analytics,
+//! - `mark_invoice_defaulted` (the public entry point) rejects any invoice
+//!   whose status is not `Funded` before touching storage, returning
+//!   `InvoiceAlreadyDefaulted` for already-defaulted invoices and
+//!   `InvoiceNotAvailableForFunding` for other non-`Funded` statuses
+//!   (`Pending`, `Verified`, `Paid`, `Refunded`, `Cancelled`).
+//! - The lower-level `handle_default` is only intended to be reached through
+//!   `mark_invoice_defaulted` or `check_and_handle_expiration`. It sets the
+//!   persistent per-invoice transition guard (`DEFAULT_TRANSITION_GUARD_KEY`)
+//!   atomically on entry and only then re-checks the status, so any direct
+//!   re-entry on the same invoice is rejected with
+//!   `DuplicateDefaultTransition` even if the prior call failed before
+//!   mutating the invoice itself. This prevents duplicate analytics,
 //!   insurance claim reprocessing, and duplicate event emission.
 //! - The status check runs before the grace-period check, and the
 //!   already-defaulted check runs before the funded-status check, so callers

@@ -1106,11 +1106,14 @@ fn test_no_double_transfer_on_double_settle_attempt() {
     let investor_balance_mid = token_client.balance(&investor);
     let contract_balance_mid = token_client.balance(&contract_id);
 
-    // Business paid exactly `invoice_amount`, investor received
-    // `investor_return`, contract received `platform_fee`.
+    // Business net delta = investment_amount (escrow auto-release credits the
+    // business) minus invoice_amount (business pays investor_return + platform_fee).
+    // Investor received `investor_return`, contract received `platform_fee`.
     assert_eq!(
         business_balance_mid,
-        business_balance_before - invoice_amount
+        business_balance_before + investment_amount - invoice_amount,
+        "business net delta after settle = investment_amount (escrow release) \
+         minus invoice_amount (total payout)",
     );
     assert_eq!(
         investor_balance_mid - investor_balance_before,
